@@ -130,3 +130,76 @@ trampoline <- function(f) {
 }
 tree_size <- trampoline(tree_size_rec)
 tree_size(tree)
+
+
+make_transform <- function(rec_func, op, lhs, rhs, cont) {
+    # lhs op rhs ->
+    left_cont <- function(left_res) {
+        right_cont <- function(right_res)
+            make_thunk(cont, op(left_res, right_res))
+        make_thunk(rec_func, rhs, right_cont)
+    }
+    make_thunk(rec_func, lhs, left_cont)
+
+}
+
+tree_size_rec <- function(tree, cont = identity) {
+    cases(tree,
+          Leaf(.) -> cont(1),
+          Tree(left, right) ->
+              make_transform(tree_size_rec, `+`, left, right, cont)
+    )
+}
+tree_size <- trampoline(tree_size_rec)
+tree_size(tree)
+
+Tree := Empty | Tree(left : Tree, key, right : Tree)
+
+insert_rec <- function(tree, key) {
+    cases(tree,
+          Empty -> Tree(Empty, key, Empty),
+          Tree(left, k, right) ->
+              if (k < key) Tree(left, k, insert(right, key))
+              else if (k > key) Tree(insert(left, key), k, right)
+              else Tree(left, key, right)
+    )
+}
+
+insert_rec <- function(tree, key, cont = identity) {
+    cases(tree,
+          Empty -> cont(Tree(Empty, key, Empty)),
+          Tree(left, k, right) -> {
+              right_cont <- function(res) Tree(left, k, res)
+              left_cont <- function(res) Tree(res, k, right)
+
+              if (k < key) insert_rec(right, key, right_cont)
+              else if (k > key) insert_rec(left, key, left_cont)
+              else cont(Tree(left, key, right))
+          }
+    )
+}
+
+insert_rec <- function(tree, key, cont = identity) {
+    cases(tree,
+          Empty -> make_thunk(cont, Tree(Empty, key, Empty)),
+          Tree(left, k, right) -> {
+              right_cont <- function(res) Tree(left, k, res)
+              left_cont <- function(res) Tree(res, k, right)
+
+              if (k < key) make_thunk(insert_rec, right, key, right_cont)
+              else if (k > key) make_thunk(insert_rec, left, key, left_cont)
+              else make_thunk(cont, Tree(left, key, right))
+          }
+    )
+}
+insert <- trampoline(insert_rec)
+
+tree <- Empty
+tree <- insert(tree, 3)
+tree
+tree <- insert(tree, 2)
+tree
+tree <- insert(tree, 4)
+tree
+tree <- insert(tree, 4)
+tree
