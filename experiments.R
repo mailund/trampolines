@@ -111,22 +111,35 @@ tree_size <- function(tree, cont = identity) {
 }
 jump(tree_size(tree))
 
-
-tree_size_rec <- function(tree, cont = identity) {
-    cases(tree,
-          Leaf(.) -> make_thunk(cont, 1),
-          Tree(left, right) -> {
-              go_right <- function(left_res) {
-                  add_results <- function(right_res)
-                      make_thunk(cont, left_res + right_res)
-                  make_thunk(tree_size_rec, right, add_results)
-              }
-              make_thunk(tree_size_rec, left, go_right)
-          })
-}
 trampoline <- function(f) {
     force(f)
     function(...) jump(f(...))
 }
-tree_size <- trampoline(tree_size_rec)
-tree_size(tree)
+
+
+make_trampoline <- function() {
+    tree_size <- function(tree, cont = identity) {
+        cases(tree,
+              Leaf(.) -> make_thunk(cont, 1),
+              Tree(left, right) -> {
+                  go_right <- function(left_res) {
+                      add_results <- function(right_res)
+                          make_thunk(cont, left_res + right_res)
+                      make_thunk(tree_size, right, add_results)
+                  }
+                  make_thunk(tree_size, left, go_right)
+              })
+    }
+    function(...) jump(tree_size(...))
+}
+
+
+tree_size_x <- make_trampoline()
+tree_size_x(tree)
+
+foobar <- function(fname) {
+    name <- deparse(substitute(fname))
+    assign(name, fname)
+    fname
+}
+foobar(tree_size)
