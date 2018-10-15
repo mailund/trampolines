@@ -1,0 +1,256 @@
+---
+title: "The cost of pmatch constructors"
+author: "Thomas Mailund"
+date: "10/15/2018"
+output: html_document
+---
+
+So, err, I wanted to compare the performance of linked lists versus R vectors on a case where the former is expected to perform better than the second: building a sequence one element at a time. If you work with vectors, whenever possible you want to allocated them to the size you are going to need. You cannot always do this, and if you find yourself having to add one element at a time by concatenation, you have a quadratic time performance on your hands.
+
+In some cases there are ways around this by being clever about allocation and reallocation, and that will give you a linear time algorithm. Using a linked list is simpler. You can add elements to the front of a list in constant time, so building a sequence using linked lists already takes linear time.
+
+Programming a linked list in R, though, will not give you the performance that vectors have, since operations on those are written in C. The performance gain you get from C implementations over R implementations will make vectors much faster for short sequences, but the better algorithm using linked list should soon outperform vectors.
+
+I wanted to get a feeling for where the two lines, the vector and the linked list performance, would cross.
+
+I got a nasty surprise.
+
+Now, I know that linked lists will eventually be faster (and I tested it when I wrote about  [functional data-tructures](https://amzn.to/2QIDJWk)). It is still true, not surprisingly, and I got no shock about that.
+
+The shock I got was how much of a performance penalty pattern matching gives me.
+
+I wrote the `pmatch` package for [*Domain-Specific Languages in R*](https://amzn.to/2QHMNLL) as an example DSL. As a language, I think it is very nice, but now I have started *using* the language. So I wanted to redo the experiment comparing lists and vectors, only with lists created using `pmatch`.
+
+I am also comparing to the linked list implementation from [*Functional Data Structures in R*](https://amzn.to/2QIDJWk), and growing a sequence one element at a time with the three different structures is implemented like this.
+
+```{r}
+structure_vector <- function(n) {
+    i <- 1
+    numbers <- c()
+    while (i <= n) {
+        numbers <- c(numbers, i)
+        i <- i + 1
+    }
+}
+
+library(pmatch)
+llist := NIL | CONS(car, cdr : llist)
+
+structure_pmatch_llist <- function(n) {
+    i <- 1
+    numbers <- NIL
+    while (i <= n) {
+        numbers <- CONS(i, numbers)
+        i <- i + 1
+    }
+}
+
+nil <- NULL
+cons <- function(car, cdr) list(car = car, cdr = cdr)
+structure_manual_llist <- function(n) {
+    i <- 1
+    numbers <- nil
+    while (i <= n) {
+        numbers <- cons(i, numbers)
+        i <- i + 1
+    }
+}
+
+```
+
+When I compare their performance, it looks absolutely horrible.
+
+```{r}
+library(microbenchmark)
+measures <- microbenchmark(
+    structure_vector(100),
+    structure_pmatch_llist(100),
+    structure_manual_llist(100)
+)
+measures
+```
+
+```{r, message=FALSE}
+library(ggplot2)
+autoplot(measures) + theme_minimal()
+```
+
+The `pmatch` implementation is orders of maginitude slower than the other two. The other linked list implementation is also slower than the vector implementation here, but that is because sequences of length 100 are too short for the linear time algorithm to outcompite the optimised implementation.
+
+With the running time I get out of the `pmatch` implementation, I cannot move to much longer lists when benchmarking, so although I know that this implementation will eventually be faster than the vector solution, it would be for very large lists.
+
+If we do look at longer lists, we can see that the (manually implemented) linked list soon outperforms the quadratic time vector solution.
+
+```{r timeit, cache=TRUE}
+timeit <- function(f) {
+    Vectorize(
+        function(n) {
+            times <- purrr::rerun(100, {
+                then <- Sys.time()
+                f(n)
+                now <- Sys.time()
+                now - then
+            })
+            mean(unlist(times))
+        }
+    )
+}
+
+ns <- rep(seq(100, 1500, by = 100), each = 5)
+app_vector_times <- tibble::tibble(
+    n = ns,
+    app = "Vector",
+    Time = timeit(structure_vector)(ns)
+)
+app_llist2_times <- tibble::tibble(
+    n = ns,
+    app = "Linked list",
+    Time = timeit(structure_manual_llist)(ns)
+)
+
+library(magrittr)
+rbind(app_vector_times, app_llist2_times) %>%
+    ggplot(aes(x = n, y = Time, colour = app)) +
+    geom_jitter() +
+    geom_smooth(method = "loess") +
+    theme_minimal()
+```
+
+I take the mean of 100 time measures to reduce the variance in the timing results. As you can see, even for the averaged times, there is a large variability in the time measures.
+
+You can clearly see that the linear time solution quickly outperforms the quadratic time solution, but what happens with the `pmatch` solution.
+
+There is some overhead in using `NIL` instead of `NULL`. I am not sure why. Of coures, `NULL` is one of the simplest objects in R and `NIL` holds some attributes, but if they are just moved around and not copied, I was expecting little if any additional cost to using `NIL`.
+
+```{r, message=FALSE}
+autoplot(microbenchmark(NIL, NULL)) + theme_minimal()
+```
+
+ It looks like that overhead is just part of having a variable.
+
+```{r, message=FALSE}
+x <- list()
+autoplot(microbenchmark(NIL, NULL, x)) + theme_minimal()
+```
+
+I do need a variable. Otherwise I cannot recognize when a constant is part of a pattern and I cannot distinguish between two zero-arguments constructors.
+
+In any case, where the running time is spent is in the constructor.
+
+```{r}
+microbenchmark(CONS(1, NIL), cons(1, NULL))
+```
+
+The `CONS` constructor is orders of magnitude slower than `cons`. That is where the runtime penalty is coming from.
+
+When you look at the function, you quickly see that it is vastly more complex than the `cons` function.
+
+```{r}
+CONS
+```
+
+I wasn't thinking enough about performance when I wrote `pmatch`,^[I really should have thought about it, since obviously it is for algorithmic programming it is most useful to have such a syntax.] so I just constructed a generic function that would work with all constructors instead of creating a function for a specific constructor.
+
+## Building a new constructor
+
+Now I'm thinking I should be able to just take a constructor and build a function exactly for that. I will attempt to do that below.  There are some utility functions in `pmatch` that I won't repeat here, but `process_arguments` takes the arguments from the constructor. For a constructor such as `CONS(car, cdr : llist)` those would be `car` and `cdr`. The `cdr` argument has a type specification, and `process_arguments` will give me that as well. With this `CONS` contructor, I will get this tibble:
+
+```r
+# A tibble: 2 x 2
+  arg   type  
+  <chr> <chr> 
+1 car   NA    
+2 cdr   llist
+```
+
+```{r, echo=FALSE}
+process_arg <- function(argument) {
+    error_msg <- glue::glue(
+        "The constructor argument is malformed.\n",
+        "The expression {deparse(argument)} should either be ",
+        "a bare symbol or on the form 'variable : type'."
+    )
+    if (rlang::is_lang(argument)) {
+        if (argument[[1]] != ":") {
+            stop(simpleError(error_msg, call = argument))
+        }
+        arg <- rlang::quo_name(argument[[2]])
+        type <- rlang::quo_name(argument[[3]])
+        tibble::tibble(arg = arg, type = type)
+    } else if (rlang::is_symbol(argument)) {
+        arg <- rlang::quo_name(argument)
+        tibble::tibble(arg = arg, type = NA)
+    } else {
+        stop(simpleError(error_msg, call = argument))
+    }
+}
+
+process_arguments <- function(constructor_arguments) {
+    dplyr::bind_rows(purrr::map(as.list(constructor_arguments), process_arg))
+}
+```
+
+The function that creates the constructor function takes three arguments, the constructor expression, the type we are defining, and the environment we need to put the constructor into. The first two are given as expressions. So, we can define the `CONS(car, cdr : llist)` constructor from the
+
+```
+llist := NIL | CONS(car, cdr : llist)
+```
+
+type definition using
+
+```{r}
+type_exp <- rlang::expr(llist)
+constructor_exp <- rlang::expr(CONS2(car, cdr : llist))
+```
+```r
+make_constructor_function(constructor_exp, type_exp, environment())
+```
+
+You do not need to assign the result of the function call to anything. The constructor is added to the environment it gets as an argument, together with code for printing the data type.
+
+```{r}
+make_args_list <- function(args) {
+    res <- replicate(length(args), substitute())
+    names(res) <- args
+    as.pairlist(res)
+}
+
+make_constructor_function <- function(constructor, data_type_name, env) {
+    constructor_name <- rlang::quo_name(constructor[[1]])
+    constructor_arguments <- process_arguments(constructor[-1])
+
+    return(constructor_arguments)
+    
+    # create the constructor function
+    constructor <- function() {
+        args <- rlang::as_list(environment())
+
+        # type check!
+        for (i in seq_along(args)) {
+            arg <- args[[constructor_arguments$arg[i]]]
+            type <- constructor_arguments$type[i]
+            if (!rlang::is_na(type) && !inherits(arg, type)) {
+                # FIXME: how do I get a "bad error message" error here? id:3 gh:42 ic:gh
+                error_msg <- glue::glue(
+                    "The argument {arg} is of type {class(arg)} ",
+                    "but should be of type {type}."
+                )
+                stop(simpleError(error_msg, call = match.call()))
+            }
+        }
+
+        structure(args, constructor = constructor_name, class = data_type_name)
+    }
+    formals(constructor) <- make_args_list(constructor_arguments$arg)
+
+    # set meta information about the constructor
+    class(constructor) <- c("constructor", "function")
+
+    # put the constructor in the binding scope
+    assign(constructor_name, constructor, envir = env)
+}
+
+
+make_constructor_function(constructor_exp, type_exp, environment())
+```
+
