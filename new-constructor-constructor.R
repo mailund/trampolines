@@ -50,7 +50,11 @@ structure_manual_llist <- function(n) {
     }
 }
 
-
+make_args_list <- function(args) {
+    res <- replicate(length(args), rlang::missing_arg())
+    names(res) <- args
+    as.pairlist(res)
+}
 make_constructor_function <- function(constructor, data_type_name, env) {
     constructor_name <- rlang::quo_name(constructor[[1]])
     constructor_arguments <- process_arguments(constructor[-1])

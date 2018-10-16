@@ -72,7 +72,7 @@ measures
 
 ```{r, message=FALSE}
 library(ggplot2)
-autoplot(measures) + theme_minimal()
+autoplot(measures)
 ```
 
 The `pmatch` implementation is orders of maginitude slower than the other two. The other linked list implementation is also slower than the vector implementation here, but that is because sequences of length 100 are too short for the linear time algorithm to outcompite the optimised implementation.
@@ -123,14 +123,14 @@ You can clearly see that the linear time solution quickly outperforms the quadra
 There is some overhead in using `NIL` instead of `NULL`. I am not sure why. Of coures, `NULL` is one of the simplest objects in R and `NIL` holds some attributes, but if they are just moved around and not copied, I was expecting little if any additional cost to using `NIL`.
 
 ```{r, message=FALSE}
-autoplot(microbenchmark(NIL, NULL)) + theme_minimal()
+autoplot(microbenchmark(NIL, NULL))
 ```
 
  It looks like that overhead is just part of having a variable.
 
 ```{r, message=FALSE}
 x <- list()
-autoplot(microbenchmark(NIL, NULL, x)) + theme_minimal()
+autoplot(microbenchmark(NIL, NULL, x))
 ```
 
 I do need a variable. Otherwise I cannot recognize when a constant is part of a pattern and I cannot distinguish between two zero-arguments constructors.
@@ -206,42 +206,60 @@ constructor_exp <- rlang::expr(CONS2(car, cdr : llist))
 make_constructor_function(constructor_exp, type_exp, environment())
 ```
 
-You do not need to assign the result of the function call to anything. The constructor is added to the environment it gets as an argument, together with code for printing the data type.
+You do not need to assign the result of the function call to anything. The constructor is added to the environment provided, as does a function for printing the data type.
+
+In the new function I create a constructor, but now I use meta programming to put the value creation inside the function instead of analysing the structure at runtime. I also replaced a call to `structure` with code for explicitly setting the class and the attribute I need for pattern matching. Because that turned out to be much faster.
+
+{<< twitter 1052103930338050048 >>}
+
+There is still a lot of code in the function, but with this version it is run when the constructor is created and not when it is called.
 
 ```{r}
-make_args_list <- function(args) {
-    res <- replicate(length(args), substitute())
-    names(res) <- args
-    as.pairlist(res)
-}
-
 make_constructor_function <- function(constructor, data_type_name, env) {
     constructor_name <- rlang::quo_name(constructor[[1]])
     constructor_arguments <- process_arguments(constructor[-1])
 
-    return(constructor_arguments)
-    
-    # create the constructor function
-    constructor <- function() {
-        args <- rlang::as_list(environment())
+    # there is a bit of code involved here, but it doesn't matter
+    # if it is slow. What matters is that the constructor is not.
+    vars <- constructor_arguments$arg
+    list_expr <- setNames(rlang::exprs(!!!rlang::syms(vars)), vars)
 
-        # type check!
-        for (i in seq_along(args)) {
-            arg <- args[[constructor_arguments$arg[i]]]
-            type <- constructor_arguments$type[i]
-            if (!rlang::is_na(type) && !inherits(arg, type)) {
-                # FIXME: how do I get a "bad error message" error here? id:3 gh:42 ic:gh
-                error_msg <- glue::glue(
-                    "The argument {arg} is of type {class(arg)} ",
-                    "but should be of type {type}."
-                )
-                stop(simpleError(error_msg, call = match.call()))
-            }
+    no_typechecks <- 0
+    typechecks <- list()
+    for (i in seq_along(constructor_arguments)) {
+        arg <- constructor_arguments[i,]
+        if (!is.na(arg$type)) {
+            var <- rlang::sym(arg$arg)
+            type <- arg$type
+
+            err_msg <- glue::glue(
+                "The argument {var} should be of type {type}."
+            )
+
+            ex <- rlang::expr(
+                if (!inherits(!!var, !!type))
+                    stop(simpleError(!!err_msg, call = match.call()))
+            )
+            typechecks <- c(typechecks, ex)
+            no_typechecks <- no_typechecks + 1
         }
-
-        structure(args, constructor = constructor_name, class = data_type_name)
     }
-    formals(constructor) <- make_args_list(constructor_arguments$arg)
+    length(typechecks) <- no_typechecks
+
+    # create the constructor function
+    func_args <- replicate(length(vars), rlang::missing_arg())
+    names(func_args) <- vars
+    
+    body <- rlang::expr({
+        !!!typechecks
+        args <- !!list_expr
+        class(args) <- !!data_type_name
+        attr(args, "constructor") <- !!constructor_name
+        args
+    })
+    constructor <- rlang::new_function(
+        func_args, body, env
+    )
 
     # set meta information about the constructor
     class(constructor) <- c("constructor", "function")
@@ -250,7 +268,74 @@ make_constructor_function <- function(constructor, data_type_name, env) {
     assign(constructor_name, constructor, envir = env)
 }
 
-
-make_constructor_function(constructor_exp, type_exp, environment())
 ```
+
+I didn't add the printing function here. It is the same as earlier and I didn't want to complicate the function.
+
+The `:=` syntax still uses the old function, I haven't changed the implementation of the operator after all, so I have to create the constructors manually. I make one with a type specification and another without, to get a measure of the runtime cost of checking a type.
+
+```{r}
+make_constructor_function(
+    rlang::expr(CONS2(car, cdr)),
+    "llist",
+    environment()
+)
+make_constructor_function(
+    rlang::expr(CONS3(car, cdr : llist)),
+    "llist",
+    environment()
+)
+
+CONS2
+CONS3
+```
+
+Now I can add the two new constructors to my performance tests.
+
+```{r}
+structure_pmatch_llist2 <- function(n) {
+    i <- 1
+    numbers <- NIL
+    while (i <= n) {
+        numbers <- CONS2(i, numbers)
+        i <- i + 1
+    }
+}
+
+structure_pmatch_llist3 <- function(n) {
+    i <- 1
+    numbers <- NIL
+    while (i <= n) {
+        numbers <- CONS3(i, numbers)
+        i <- i + 1
+    }
+}
+```
+
+As you can see, the new constructors are much faster.
+
+```{r, message=FALSE}
+measures <- microbenchmark(
+    structure_pmatch_llist(100),
+    structure_pmatch_llist3(100),
+    structure_pmatch_llist2(100),
+    structure_manual_llist(100)
+)
+autoplot(measures)
+```
+
+Manually creating the list structure is still faster, but not frightningly so. 
+
+```{r, message=FALSE}
+measures <- microbenchmark(
+    structure_pmatch_llist3(100),
+    structure_pmatch_llist2(100),
+    structure_manual_llist(100)
+)
+autoplot(measures)
+```
+
+There is still some overhead to using patterns for type construction, but that is hard to avoid.
+
+Now, as you can imagine, there is also a lot of overhead in matching types with the `cases` function, but I think I can speed that up as well. I'm working on it.
 
