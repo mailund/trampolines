@@ -128,7 +128,7 @@ case_func <- function(expr, ...) {
     matchings <- rlang::quos(...)
 
     match_cases <- rlang::expr({
-        if (TRUE) stop("None of the patterns match.")
+        stop("None of the patterns match.")
     })
     for (i in rev(seq_along(matchings))) {
         eval_env <- rlang::get_env(matchings[[i]])
